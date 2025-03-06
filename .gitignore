@@ -1,0 +1,3 @@
+# 忽略 PyCharm 生成的 .idea 目录
+.idea/
+
