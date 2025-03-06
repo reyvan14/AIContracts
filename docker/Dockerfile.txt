@@ -1,0 +1,65 @@
+# Dockerfile
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# 阶段1：基础设置，供其他阶段使用
+FROM python:3.11-slim AS base
+
+# 更新并安装安全补丁
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 设置用户主目录环境变量
+ENV HOME=/home/user
+
+# 创建一个名为user的用户，并设置其主目录和shell
+RUN useradd -m -s /bin/bash user && \
+    mkdir -p $HOME && \
+    chown -R user $HOME
+
+# 设置工作目录为用户主目录
+WORKDIR $HOME
+
+
+# 阶段2：获取最新的GenAIComps源码
+FROM base AS git
+
+# 安装git工具
+RUN apt-get update && apt-get install -y --no-install-recommends git
+
+# 克隆GenAIComps仓库，只拉取最新代码
+RUN git clone --depth 1 https://github.com/opea-project/GenAIComps.git
+
+
+# 阶段3：构建共享的基础层，供使用GenAIComps的服务使用
+FROM base AS comps-base
+
+# 从git阶段复制必要的文件到当前镜像
+COPY --from=git $HOME/GenAIComps/comps $HOME/GenAIComps/comps
+COPY --from=git $HOME/GenAIComps/*.* $HOME/GenAIComps/LICENSE $HOME/GenAIComps/
+
+# 设置工作目录为GenAIComps目录
+WORKDIR $HOME/GenAIComps
+
+# 升级pip和setuptools，并安装依赖项
+RUN pip install --no-cache-dir --upgrade pip setuptools && \
+    pip install --no-cache-dir -r $HOME/GenAIComps/requirements.txt
+
+# 返回到用户主目录
+WORKDIR $HOME
+
+# 将GenAIComps目录添加到Python路径中
+ENV PYTHONPATH=$PYTHONPATH:$HOME/GenAIComps
+
+# 切换到普通用户执行后续操作
+USER user
+
+
+# 阶段4：特定于本项目的部分
+FROM comps-base
+
+# 复制chatqna.py脚本到用户主目录
+COPY ./src/chatqna.py $HOME/chatqna.py
+COPY ./src/prompt.py $HOME/prompt.py
+# 设置容器启动时执行的命令
+ENTRYPOINT ["python", "chatqna.py"]

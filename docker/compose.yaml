@@ -1,0 +1,179 @@
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  # Redis 服务，用于向量数据库存储
+  redis-vector-db:
+    image: redis/redis-stack:7.2.0-v9  # 使用的 Redis 镜像版本
+    container_name: redis-vector-db  # 容器名称
+    ports:
+      - "6379:6379"  # 映射 Redis 默认端口
+      - "8001:8001"  # 映射 Redis Stack 的 REST API 端口
+
+  # 数据预处理 Redis 服务
+  dataprep-redis-service:
+    image: ${REGISTRY:-opea}/dataprep:${TAG:-latest}  # 使用的数据预处理镜像
+    container_name: dataprep-redis-server  # 容器名称
+    depends_on:
+      - redis-vector-db  # 依赖 Redis 服务
+      - tei-embedding-service  # 依赖文本嵌入服务
+    ports:
+      - "6007:5000"  # 映射数据预处理服务端口
+    environment:
+      no_proxy: ${no_proxy}  # 不使用代理的地址
+      http_proxy: ${http_proxy}  # HTTP 代理地址
+      https_proxy: ${https_proxy}  # HTTPS 代理地址
+      REDIS_URL: redis://redis-vector-db:6379  # Redis 连接地址
+      REDIS_HOST: redis-vector-db  # Redis 主机名
+      INDEX_NAME: ${INDEX_NAME}  # 索引名称
+      TEI_ENDPOINT: http://tei-embedding-service:80  # 文本嵌入服务端点
+      HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN}  # Hugging Face API 令牌
+
+  # 文本嵌入服务
+  tei-embedding-service:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5  # 使用的文本嵌入镜像
+    container_name: tei-embedding-server  # 容器名称
+    ports:
+      - "6006:80"  # 映射文本嵌入服务端口
+    volumes:
+      - "./data:/data"  # 挂载数据卷
+    shm_size: 1g  # 共享内存大小
+    environment:
+      no_proxy: ${no_proxy}  # 不使用代理的地址
+      http_proxy: ${http_proxy}  # HTTP 代理地址
+      https_proxy: ${https_proxy}  # HTTPS 代理地址
+    command: --model-id ${EMBEDDING_MODEL_ID} --auto-truncate  # 启动命令
+
+  # 检索服务
+  retriever:
+    image: ${REGISTRY:-opea}/retriever:${TAG:-latest}  # 使用的检索镜像
+    container_name: retriever-redis-server  # 容器名称
+    depends_on:
+      - redis-vector-db  # 依赖 Redis 服务
+    ports:
+      - "7000:7000"  # 映射检索服务端口
+    ipc: host  # 使用主机 IPC 命名空间
+    environment:
+      no_proxy: ${no_proxy}  # 不使用代理的地址
+      http_proxy: ${http_proxy}  # HTTP 代理地址
+      https_proxy: ${https_proxy}  # HTTPS 代理地址
+      REDIS_URL: redis://redis-vector-db:6379  # Redis 连接地址
+      REDIS_HOST: redis-vector-db  # Redis 主机名
+      INDEX_NAME: ${INDEX_NAME}  # 索引名称
+      TEI_EMBEDDING_ENDPOINT: http://tei-embedding-service:80  # 文本嵌入服务端点
+      HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN}  # Hugging Face API 令牌
+      LOGFLAG: ${LOGFLAG}  # 日志标志
+      RETRIEVER_COMPONENT_NAME: "OPEA_RETRIEVER_REDIS"  # 检索组件名称
+    restart: unless-stopped  # 除非手动停止，否则总是重启
+
+  # 文本重排序服务
+  tei-reranking-service:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5  # 使用的文本嵌入镜像
+    container_name: tei-reranking-server  # 容器名称
+    ports:
+      - "8808:80"  # 映射文本重排序服务端口
+    volumes:
+      - "./data:/data"  # 挂载数据卷
+    shm_size: 1g  # 共享内存大小
+    environment:
+      no_proxy: ${no_proxy}  # 不使用代理的地址
+      http_proxy: ${http_proxy}  # HTTP 代理地址
+      https_proxy: ${https_proxy}  # HTTPS 代理地址
+      HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN}  # Hugging Face API 令牌
+      HF_HUB_DISABLE_PROGRESS_BARS: 1  # 禁用进度条
+      HF_HUB_ENABLE_HF_TRANSFER: 0  # 禁用 HF 转移
+    command: --model-id ${RERANK_MODEL_ID} --auto-truncate  # 启动命令
+
+  # VLLM 服务
+  vllm-service:
+    image: ${REGISTRY:-opea}/vllm:${TAG:-latest}  # 使用的 VLLM 镜像
+    container_name: vllm-service  # 容器名称
+    ports:
+      - "9009:80"  # 映射 VLLM 服务端口
+    volumes:
+      - "./data:/data"  # 挂载数据卷
+    shm_size: 128g  # 共享内存大小
+    environment:
+      no_proxy: ${no_proxy}  # 不使用代理的地址
+      http_proxy: ${http_proxy}  # HTTP 代理地址
+      https_proxy: ${https_proxy}  # HTTPS 代理地址
+      HF_TOKEN: ${HUGGINGFACEHUB_API_TOKEN}  # Hugging Face API 令牌
+      LLM_MODEL_ID: ${LLM_MODEL_ID}  # 大语言模型 ID
+      VLLM_TORCH_PROFILER_DIR: "/mnt"  # Torch Profiler 目录
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://$host_ip:9009/health || exit 1"]  # 健康检查命令
+      interval: 10s  # 检查间隔
+      timeout: 10s  # 超时时间
+      retries: 100  # 重试次数
+    command: --model $LLM_MODEL_ID --host 0.0.0.0 --port 80  # 启动命令
+
+  # ChatQnA 后端服务
+  chatqna-xeon-backend-server:
+    image: ${REGISTRY:-opea}/chatqna:${TAG:-latest}  # 使用的 ChatQnA 后端镜像
+    container_name: chatqna-xeon-backend-server  # 容器名称
+    depends_on:
+      - redis-vector-db  # 依赖 Redis 服务
+      - tei-embedding-service  # 依赖文本嵌入服务
+      - retriever  # 依赖检索服务
+      - tei-reranking-service  # 依赖文本重排序服务
+      - vllm-service  # 依赖 VLLM 服务
+    ports:
+      - "8888:8888"  # 映射后端服务端口
+    environment:
+      - no_proxy=${no_proxy}  # 不使用代理的地址
+      - https_proxy=${https_proxy}  # HTTPS 代理地址
+      - http_proxy=${http_proxy}  # HTTP 代理地址
+      - MEGA_SERVICE_HOST_IP=chatqna-xeon-backend-server  # MEGA 服务主机 IP
+      - EMBEDDING_SERVER_HOST_IP=tei-embedding-service  # 嵌入服务主机 IP
+      - EMBEDDING_SERVER_PORT=${EMBEDDING_SERVER_PORT:-80}  # 嵌入服务端口
+      - RETRIEVER_SERVICE_HOST_IP=retriever  # 检索服务主机 IP
+      - RERANK_SERVER_HOST_IP=tei-reranking-service  # 重排序服务主机 IP
+      - RERANK_SERVER_PORT=${RERANK_SERVER_PORT:-80}  # 重排序服务端口
+      - LLM_SERVER_HOST_IP=vllm-service  # 大语言模型服务主机 IP
+      - LLM_SERVER_PORT=${LLM_SERVER_PORT:-80}  # 大语言模型服务端口
+      - LLM_MODEL=${LLM_MODEL_ID}  # 大语言模型 ID
+      - LOGFLAG=${LOGFLAG}  # 日志标志
+    ipc: host  # 使用主机 IPC 命名空间
+    restart: always  # 总是重启
+
+  # ChatQnA UI 服务
+  chatqna-xeon-ui-server:
+    image: ${REGISTRY:-opea}/chatqna-ui:${TAG:-latest}  # 使用的 ChatQnA UI 镜像
+    container_name: chatqna-xeon-ui-server  # 容器名称
+    depends_on:
+      - chatqna-xeon-backend-server  # 依赖后端服务
+    ports:
+      - "5173:5173"  # 映射 UI 服务端口
+    environment:
+      - no_proxy=${no_proxy}  # 不使用代理的地址
+      - https_proxy=${https_proxy}  # HTTPS 代理地址
+      - http_proxy=${http_proxy}  # HTTP 代理地址
+    ipc: host  # 使用主机 IPC 命名空间
+    restart: always  # 总是重启
+
+  # ChatQnA Nginx 服务
+  chatqna-xeon-nginx-server:
+    image: ${REGISTRY:-opea}/nginx:${TAG:-latest}  # 使用的 Nginx 镜像
+    container_name: chatqna-xeon-nginx-server  # 容器名称
+    depends_on:
+      - chatqna-xeon-backend-server  # 依赖后端服务
+      - chatqna-xeon-ui-server  # 依赖 UI 服务
+    ports:
+      - "${NGINX_PORT:-80}:80"  # 映射 Nginx 服务端口
+    environment:
+      - no_proxy=${no_proxy}  # 不使用代理的地址
+      - https_proxy=${https_proxy}  # HTTPS 代理地址
+      - http_proxy=${http_proxy}  # HTTP 代理地址
+      - FRONTEND_SERVICE_IP=chatqna-xeon-ui-server  # 前端服务 IP
+      - FRONTEND_SERVICE_PORT=5173  # 前端服务端口
+      - BACKEND_SERVICE_NAME=chatqna  # 后端服务名称
+      - BACKEND_SERVICE_IP=chatqna-xeon-backend-server  # 后端服务 IP
+      - BACKEND_SERVICE_PORT=8888  # 后端服务端口
+      - DATAPREP_SERVICE_IP=dataprep-redis-service  # 数据预处理服务 IP
+      - DATAPREP_SERVICE_PORT=5000  # 数据预处理服务端口
+    ipc: host  # 使用主机 IPC 命名空间
+    restart: always  # 总是重启
+
+networks:
+  default:
+    driver: bridge  # 使用桥接网络驱动
